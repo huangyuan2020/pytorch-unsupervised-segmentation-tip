@@ -138,8 +138,8 @@ for batch_idx in range(args.maxIter):
             color_avg = [np.mean(img_flatten[im_target == label], axis=0, dtype=np.int) for label in un_label]
         for lab_id, color in enumerate(color_avg):
             img_flatten[lab_inverse == lab_id] = color
-        show = img_flatten.reshape(im.shape)
-        cv2.imshow("seg_pt", show)
+        im_target_rgb = img_flatten.reshape(im.shape)
+        cv2.imshow("seg_pt", im_target_rgb)
         cv2.waitKey(10)
 
     # loss 
@@ -163,6 +163,11 @@ if not args.visualize:
     output = output.permute( 1, 2, 0 ).contiguous().view( -1, args.nChannel )
     ignore, target = torch.max( output, 1 )
     im_target = target.data.cpu().numpy()
-    im_target_rgb = np.array([label_colours[ c % args.nChannel ] for c in im_target])
-    im_target_rgb = im_target_rgb.reshape( im.shape ).astype( np.uint8 )
+    un_label, lab_inverse = np.unique(im_target, return_inverse=True, )
+    nLabels = len(un_label)
+    img_flatten = image_flatten.copy()
+    color_avg = [np.mean(img_flatten[im_target == label], axis=0, dtype=np.int) for label in un_label]
+    for lab_id, color in enumerate(color_avg):
+        img_flatten[lab_inverse == lab_id] = color
+    im_target_rgb = img_flatten.reshape(im.shape)
 cv2.imwrite( "output.png", im_target_rgb )
