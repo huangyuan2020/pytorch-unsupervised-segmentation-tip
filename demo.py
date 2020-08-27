@@ -30,7 +30,7 @@ parser.add_argument('--nConv', metavar='M', default=2, type=int,
 parser.add_argument('--visualize', metavar='1 or 0', default=1, type=int, 
                     help='visualization flag')
 parser.add_argument('--input', metavar='FILENAME',
-                    help='input image file name', required=True)
+                    help='input image file name', default='./BSD500/101027.jpg')
 parser.add_argument('--stepsize_sim', metavar='SIM', default=1, type=float,
                     help='step size for similarity loss', required=False)
 parser.add_argument('--stepsize_con', metavar='CON', default=1, type=float, 
@@ -67,10 +67,12 @@ class MyNet(nn.Module):
 
 # load image
 im = cv2.imread(args.input)
+image_flatten = im.reshape((-1, 3))
 data = torch.from_numpy( np.array([im.transpose( (2, 0, 1) ).astype('float32')/255.]) )
 if use_cuda:
     data = data.cuda()
 data = Variable(data)
+
 
 # load scribble
 if args.scribble:
@@ -80,7 +82,7 @@ if args.scribble:
     mask_inds = np.delete( mask_inds, np.argwhere(mask_inds==255) )
     inds_sim = torch.from_numpy( np.where( mask == 255 )[ 0 ] )
     inds_scr = torch.from_numpy( np.where( mask != 255 )[ 0 ] )
-    target_scr = torch.from_numpy( mask.astype(np.int) )
+    target_scr = torch.from_numpy( mask.astype(np.int64) )
     if use_cuda:
         inds_sim = inds_sim.cuda()
         inds_scr = inds_scr.cuda()
@@ -113,7 +115,7 @@ if use_cuda:
     
 optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=0.9)
 label_colours = np.random.randint(255,size=(100,3))
-
+color_avg = np.random.randint(255, size=(100, 3))
 for batch_idx in range(args.maxIter):
     # forwarding
     optimizer.zero_grad()
@@ -128,11 +130,16 @@ for batch_idx in range(args.maxIter):
 
     ignore, target = torch.max( output, 1 )
     im_target = target.data.cpu().numpy()
-    nLabels = len(np.unique(im_target))
+    un_label, lab_inverse = np.unique(im_target, return_inverse=True, )
+    nLabels = len(un_label)
     if args.visualize:
-        im_target_rgb = np.array([label_colours[ c % args.nChannel ] for c in im_target])
-        im_target_rgb = im_target_rgb.reshape( im.shape ).astype( np.uint8 )
-        cv2.imshow( "output", im_target_rgb )
+        img_flatten = image_flatten.copy()
+        if len(color_avg) != un_label.shape[0]:
+            color_avg = [np.mean(img_flatten[im_target == label], axis=0, dtype=np.int) for label in un_label]
+        for lab_id, color in enumerate(color_avg):
+            img_flatten[lab_inverse == lab_id] = color
+        show = img_flatten.reshape(im.shape)
+        cv2.imshow("seg_pt", show)
         cv2.waitKey(10)
 
     # loss 
