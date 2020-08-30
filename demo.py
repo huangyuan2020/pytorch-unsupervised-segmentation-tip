@@ -11,6 +11,9 @@ import sys
 import numpy as np
 import torch.nn.init
 import random
+from tqdm import tqdm
+import itertools
+import math
 
 use_cuda = torch.cuda.is_available()
 
@@ -30,7 +33,7 @@ parser.add_argument('--nConv', metavar='M', default=2, type=int,
 parser.add_argument('--visualize', metavar='1 or 0', default=1, type=int, 
                     help='visualization flag')
 parser.add_argument('--input', metavar='FILENAME',
-                    help='input image file name', required=True)
+                    help='input image file name', default='./interior/color/0.png')
 parser.add_argument('--stepsize_sim', metavar='SIM', default=1, type=float,
                     help='step size for similarity loss', required=False)
 parser.add_argument('--stepsize_con', metavar='CON', default=1, type=float, 
@@ -67,6 +70,8 @@ class MyNet(nn.Module):
 
 # load image
 im = cv2.imread(args.input)
+depth = cv2.imread(args.input.replace('color', 'depth'), -1)
+im_target_rgb = im
 data = torch.from_numpy( np.array([im.transpose( (2, 0, 1) ).astype('float32')/255.]) )
 if use_cuda:
     data = data.cuda()
@@ -103,6 +108,11 @@ if args.scribble:
     # set minLabels
     args.minLabels = len(mask_inds)
 
+fx_d = 5.8262448167737955e+02;
+fy_d = 5.8269103270988637e+02;
+cx_d = 3.1304475870804731e+02;
+cy_d = 2.3844389626620386e+02;
+
 # train
 model = MyNet( data.size(1) )
 if use_cuda:
@@ -135,6 +145,7 @@ for batch_idx in range(args.maxIter):
     output = output.permute( 1, 2, 0 ).contiguous().view( -1, args.nChannel )
 
     outputHP = output.reshape( (im.shape[0], im.shape[1], args.nChannel) )
+
     HPy = outputHP[1:, :, :] - outputHP[0:-1, :, :]
     HPz = outputHP[:, 1:, :] - outputHP[:, 0:-1, :]
     lhpy = loss_hpy(HPy,HPy_target)
@@ -142,18 +153,61 @@ for batch_idx in range(args.maxIter):
 
     ignore, target = torch.max( output, 1 )
     im_target = target.data.cpu().numpy()
+    # gen dict{label:[cord]}
+    label_dict = {}
+    im_target_HP = im_target.reshape((im.shape[0], im.shape[1]))
+    for y in range(im.shape[0]):
+        for x in range(im.shape[1]):
+            label = im_target_HP[y][x]
+            if label not in label_dict.keys():
+                label_dict[label] = []
+            label_dict[label].append((x, y))
     nLabels = len(np.unique(im_target))
+    # random sample dict
+    print('sample N group 3 point from label_dict')
+    N = 5
+    sample_dict = {}
+    for label_list in tqdm(label_dict.items()):
+        if label_list[0] not in sample_dict.keys():
+            sample_dict[label_list[0]] = []
+        list = random.sample(label_list[1], N*3)
+        random.shuffle(list) 
+        n = 5
+        m = int(len(list)/n)
+        list2 = []
+        for i in range(0, len(list), m):
+            list2.append(list[i:i+m])
+        # find depth for selected points
+        N_normal_group = []
+        for group in list2:
+            group_3d_point = []
+            for p in group:
+                val_depth = depth/5000
+                d = val_depth[p[1]][p[0]]
+                X = (p[0] - cx_d)/fx_d*d
+                Y = (p[1] - cy_d)/fy_d*d
+                group_3d_point.append(np.array([X, Y, d]))
+            p12 = np.subtract(group_3d_point[1], group_3d_point[0])
+            p13 = np.subtract(group_3d_point[2], group_3d_point[0])
+            n = np.cross(p12, p13)
+            N_normal_group.append(n)
+        N_normal_group = itertools.permutations(N_normal_group, 2)
+        cos_theta_list = []
+        for normal_2 in N_normal_group:
+            (x1, y1, z1), (x2, y2, z2) = normal_2
+            cos_theta = (x1*x2+y1*y2+z1*z2)/(math.sqrt(x1*x1+y1*y1+z1*z1)*math.sqrt(x2*x2+y2*y2+z2*z2))
+            cos_theta_list.append(cos_theta)
+        normal_theta = np.var(cos_theta_list)
+        print(normal_theta)
+
+
+
+    
     if args.visualize:
         un_label, lab_inverse = np.unique(im_target, return_inverse=True, )
-        im_target_rgb = np.zeros(640*480)
         if len(color_avg) != un_label.shape[0]:
             color_avg = [np.mean(im_target_rgb[im_target == label], axis=0, dtype=np.int) for label in un_label]
         for lab_id, color in enumerate(color_avg):
-            print(im_target)
-            print(lab_id)
-            print(lab_inverse)
-            print(im_target_rgb)
-            exit()
             im_target_rgb[lab_inverse == lab_id] = color
         im_target_rgb = im_target_rgb.reshape( im.shape ).astype( np.uint8 )
         cv2.imshow( "output", im_target_rgb )
