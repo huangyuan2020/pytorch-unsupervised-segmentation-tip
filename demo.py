@@ -18,6 +18,8 @@ import math
 use_cuda = torch.cuda.is_available()
 
 parser = argparse.ArgumentParser(description='PyTorch Unsupervised Segmentation')
+parser.add_argument('--normal_loss', action='store_true', default=False, 
+                    help='use scribbles')
 parser.add_argument('--scribble', action='store_true', default=False, 
                     help='use scribbles')
 parser.add_argument('--nChannel', metavar='N', default=100, type=int, 
@@ -70,9 +72,15 @@ class MyNet(nn.Module):
 
 # load image
 im = cv2.imread(args.input)
-depth = cv2.imread(args.input.replace('color', 'depth'), -1)
-im_target_rgb = im
-data = torch.from_numpy( np.array([im.transpose( (2, 0, 1) ).astype('float32')/255.]) )
+show = im
+image_flatten = im.reshape((-1, 3))
+depth_unnorm = cv2.imread(args.input.replace('color', 'depth'), -1)
+depth = (depth_unnorm - np.min(depth_unnorm)) / (np.max(depth_unnorm) - np.min(depth_unnorm))
+depth = depth.reshape((depth.shape[0], depth.shape[1], 1))
+data_input = np.concatenate((im/255., depth), 2)
+data = torch.from_numpy( np.array([data_input.transpose( (2, 0, 1) ).astype('float32')]) )
+#data = torch.from_numpy( np.array([im.transpose( (2, 0, 1) ).astype('float32')]) )
+
 if use_cuda:
     data = data.cuda()
 data = Variable(data)
@@ -108,6 +116,12 @@ if args.scribble:
     # set minLabels
     args.minLabels = len(mask_inds)
 
+# load line_mask
+if args.line_mask:
+    line = cv2.imread(args.line_path, -1)
+    line = line.reshape(-1, 1)
+    line_mask = line.repeat(100, axis=1)
+##### 20200901 1.转tensor 2.mask 3.取和line_mask做减法最小的值为Loss
 fx_d = 5.8262448167737955e+02;
 fy_d = 5.8269103270988637e+02;
 cx_d = 3.1304475870804731e+02;
@@ -129,14 +143,24 @@ loss_fn_scr = torch.nn.CrossEntropyLoss()
 loss_hpy = torch.nn.L1Loss(size_average = True)
 loss_hpz = torch.nn.L1Loss(size_average = True)
 
+# line mask loss definition
+loss_line = torch.nn.L2Loss(size_average = True)
+
+# define continuity target
 HPy_target = torch.zeros(im.shape[0]-1, im.shape[1], args.nChannel)
 HPz_target = torch.zeros(im.shape[0], im.shape[1]-1, args.nChannel)
+
+# define line mask target
+im_line_target = torch.zeros(im.shape[0], im.shape[1])
+
 if use_cuda:
     HPy_target = HPy_target.cuda()
     HPz_target = HPz_target.cuda()
     
 optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=0.9)
 color_avg = np.random.randint(255,size=(100,3))
+label_colours = np.random.randint(255,size=(100,3))
+
 
 for batch_idx in range(args.maxIter):
     # forwarding
@@ -152,63 +176,34 @@ for batch_idx in range(args.maxIter):
     lhpz = loss_hpz(HPz,HPz_target)
 
     ignore, target = torch.max( output, 1 )
-    im_target = target.data.cpu().numpy()
-    # gen dict{label:[cord]}
-    label_dict = {}
-    im_target_HP = im_target.reshape((im.shape[0], im.shape[1]))
-    for y in range(im.shape[0]):
-        for x in range(im.shape[1]):
-            label = im_target_HP[y][x]
-            if label not in label_dict.keys():
-                label_dict[label] = []
-            label_dict[label].append((x, y))
-    nLabels = len(np.unique(im_target))
-    # random sample dict
-    print('sample N group 3 point from label_dict')
-    N = 5
-    sample_dict = {}
-    for label_list in tqdm(label_dict.items()):
-        if label_list[0] not in sample_dict.keys():
-            sample_dict[label_list[0]] = []
-        list = random.sample(label_list[1], N*3)
-        random.shuffle(list) 
-        n = 5
-        m = int(len(list)/n)
-        list2 = []
-        for i in range(0, len(list), m):
-            list2.append(list[i:i+m])
-        # find depth for selected points
-        N_normal_group = []
-        for group in list2:
-            group_3d_point = []
-            for p in group:
-                val_depth = depth/5000
-                d = val_depth[p[1]][p[0]]
-                X = (p[0] - cx_d)/fx_d*d
-                Y = (p[1] - cy_d)/fy_d*d
-                group_3d_point.append(np.array([X, Y, d]))
-            p12 = np.subtract(group_3d_point[1], group_3d_point[0])
-            p13 = np.subtract(group_3d_point[2], group_3d_point[0])
-            n = np.cross(p12, p13)
-            N_normal_group.append(n)
-        N_normal_group = itertools.permutations(N_normal_group, 2)
-        cos_theta_list = []
-        for normal_2 in N_normal_group:
-            (x1, y1, z1), (x2, y2, z2) = normal_2
-            cos_theta = (x1*x2+y1*y2+z1*z2)/(math.sqrt(x1*x1+y1*y1+z1*z1)*math.sqrt(x2*x2+y2*y2+z2*z2))
-            cos_theta_list.append(cos_theta)
-        normal_theta = np.var(cos_theta_list)
-        print(normal_theta)
 
-
+    line_mask_output = target.copy() # HxWx100
+    line_mask_output[line_mask == 0] = 0 # HxWx100
 
     
+
+    im_target = target.data.cpu().numpy()
+    im_target_show = im_target.reshape(im.shape[:2]).astype(np.uint8)
+
+    nLabels = len(np.unique(im_target))
+
+    '''
+    # avg color
     if args.visualize:
         un_label, lab_inverse = np.unique(im_target, return_inverse=True, )
-        if len(color_avg) != un_label.shape[0]:
-            color_avg = [np.mean(im_target_rgb[im_target == label], axis=0, dtype=np.int) for label in un_label]
-        for lab_id, color in enumerate(color_avg):
-            im_target_rgb[lab_inverse == lab_id] = color
+        if un_label.shape[0] < args.nChannel:  # update show
+            img_flatten = image_flatten.copy()
+            if len(color_avg) != un_label.shape[0]:
+                color_avg = [np.mean(img_flatten[im_target == label], axis=0, dtype=np.int) for label in un_label]
+            for lab_id, color in enumerate(color_avg):
+                img_flatten[lab_inverse == lab_id] = color
+            show = img_flatten.reshape(im.shape)
+        cv2.imshow( "output", show )
+        cv2.waitKey(10)
+    '''
+    # random color
+    if args.visualize:
+        im_target_rgb = np.array([label_colours[ c % args.nChannel ] for c in im_target])
         im_target_rgb = im_target_rgb.reshape( im.shape ).astype( np.uint8 )
         cv2.imshow( "output", im_target_rgb )
         cv2.waitKey(10)
@@ -216,6 +211,10 @@ for batch_idx in range(args.maxIter):
     # loss 
     if args.scribble:
         loss = args.stepsize_sim * loss_fn(output[ inds_sim ], target[ inds_sim ]) + args.stepsize_scr * loss_fn_scr(output[ inds_scr ], target_scr[ inds_scr ]) + args.stepsize_con * (lhpy + lhpz)
+    elif args.normal_loss:
+        #print("loss : sim {} | con {} | norm {}".format(args.stepsize_sim * loss_fn(output, target), args.stepsize_con * (lhpy + lhpz), args.stepsize_sim * loss_nm))
+        #loss = args.stepsize_sim * loss_fn(output, target) + args.stepsize_con * (lhpy + lhpz) + args.stepsize_sim * loss_nm
+        loss = args.stepsize_sim * loss_nm
     else:
         loss = args.stepsize_sim * loss_fn(output, target) + args.stepsize_con * (lhpy + lhpz)
         
